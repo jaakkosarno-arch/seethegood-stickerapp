@@ -1,35 +1,30 @@
-// See the Good — sticker send backend
-//
-// The frontend (StickerPicker.jsx) can't call Slack directly:
-//   1. Slack blocks browser-origin requests (CORS).
-//   2. Your bot token must never be shipped to a browser.
-// This tiny server sits in between: frontend -> this server -> Slack.
+// See the Good — sticker server, now with an in-Slack shortcut + modal,
+// alongside the original standalone /send-sticker route (used by the
+// picker webpage, if you still want that too).
 //
 // Setup:
-//   1. npm init -y && npm install express node-fetch cors dotenv
-//   2. Create a Slack app at https://api.slack.com/apps
-//      - Add bot token scope: chat:write
-//      - Install to workspace, copy the Bot User OAuth Token (xoxb-...)
-//   3. Create a .env file:  SLACK_BOT_TOKEN=xoxb-...
-//   4. node server.js
-//   5. Deploy anywhere (Render, Railway, Fly.io, a small VPS) and put
-//      the public URL + "/send-sticker" into the artifact's
-//      "Backend settings" field.
+//   1. npm install
+//   2. .env needs:
+//        SLACK_BOT_TOKEN=xoxb-...
+//        SLACK_SIGNING_SECRET=...   (from Slack app's Basic Information page)
+//   3. In your Slack app config:
+//        - Turn ON "Interactivity & Shortcuts"
+//        - Request URL: https://your-server.onrender.com/slack/events
+//        - Add a Message Shortcut: name "Give a Strength Sticker",
+//          callback_id "give_sticker"
+//        - Bot Token Scopes needed: chat:write
+//   4. node server.js  (or deploy to Render as before)
 
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
+import pkg from "@slack/bolt";
+const { App, ExpressReceiver } = pkg;
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+const BASE = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main";
 
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-
-// Map strength name -> hosted image URL for the sticker art.
-// Replace these with real hosted URLs (S3/Cloudinary/GitHub raw) once
-// you've cropped each circle out of the sticker sheet.
 const STICKER_IMAGES = {
+  "Strength Spotter": `${BASE}/strength-spotter.png`,
   "Love of Learning": `${BASE}/love-of-learning.png`,
   "Gratitude": `${BASE}/gratitude.png`,
   "Modesty": `${BASE}/modesty.png`,
@@ -58,72 +53,121 @@ const STICKER_IMAGES = {
   "Teamwork": `${BASE}/teamwork.png`,
 };
 
-// recipient can be a Slack user ID (U...), a channel ID (C...), or an
-// @handle/#channel-name that you resolve to an ID first (see resolveTarget).
-async function resolveTarget(recipient) {
-  if (/^[UC][A-Z0-9]{6,}$/.test(recipient)) return recipient;
-
-  const handle = recipient.replace(/^[@#]/, "");
-  const isChannel = recipient.startsWith("#");
-
-  const url = isChannel
-    ? "https://slack.com/api/conversations.list?limit=1000"
-    : "https://slack.com/api/users.list?limit=1000";
-
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` },
-  });
-  const data = await res.json();
-  if (!data.ok) throw new Error(`Slack lookup failed: ${data.error}`);
-
-  if (isChannel) {
-    const ch = data.channels.find((c) => c.name === handle);
-    if (!ch) throw new Error(`Channel #${handle} not found`);
-    return ch.id;
-  } else {
-    const user = data.members.find(
-      (m) => m.name === handle || m.profile?.display_name === handle
-    );
-    if (!user) throw new Error(`User @${handle} not found`);
-    return user.id;
+// --- shared send logic, used by both the shortcut flow and /send-sticker ---
+async function postSticker(client, { channel, thread_ts, strength, note, mentionUserId }) {
+  const imageUrl = STICKER_IMAGES[strength];
+  const blocks = [];
+  if (imageUrl) {
+    blocks.push({ type: "image", image_url: imageUrl, alt_text: strength });
   }
+  const mention = mentionUserId ? `<@${mentionUserId}> ` : "";
+  blocks.push({
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: `${mention}was seen for *${strength}*${note ? `\n${note}` : ""}`,
+    },
+  });
+
+  return client.chat.postMessage({
+    channel,
+    thread_ts,
+    blocks,
+    text: `${mention}was seen for ${strength}`,
+  });
 }
 
+// --- Bolt app (handles the Slack shortcut + modal) --------------------
+const receiver = new ExpressReceiver({
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  endpoints: "/slack/events",
+});
+
+const boltApp = new App({
+  token: process.env.SLACK_BOT_TOKEN,
+  receiver,
+});
+
+const strengthOptions = Object.keys(STICKER_IMAGES).map((name) => ({
+  text: { type: "plain_text", text: name },
+  value: name,
+}));
+
+// Message shortcut: right-click a message -> "Give a Strength Sticker"
+boltApp.shortcut("give_sticker", async ({ shortcut, ack, client }) => {
+  await ack();
+
+  await client.views.open({
+    trigger_id: shortcut.trigger_id,
+    view: {
+      type: "modal",
+      callback_id: "give_sticker_submit",
+      private_metadata: JSON.stringify({
+        channel: shortcut.channel.id,
+        thread_ts: shortcut.message.ts,
+        recipient: shortcut.message.user, // author of the original message
+      }),
+      title: { type: "plain_text", text: "Give a sticker" },
+      submit: { type: "plain_text", text: "Send" },
+      close: { type: "plain_text", text: "Cancel" },
+      blocks: [
+        {
+          type: "input",
+          block_id: "strength_block",
+          label: { type: "plain_text", text: "Strength" },
+          element: {
+            type: "static_select",
+            action_id: "strength_select",
+            options: strengthOptions,
+            placeholder: { type: "plain_text", text: "Pick a strength" },
+          },
+        },
+        {
+          type: "input",
+          block_id: "note_block",
+          optional: true,
+          label: { type: "plain_text", text: "Note (optional)" },
+          element: {
+            type: "plain_text_input",
+            action_id: "note_input",
+            multiline: true,
+          },
+        },
+      ],
+    },
+  });
+});
+
+// Modal submit handler
+boltApp.view("give_sticker_submit", async ({ ack, view, client }) => {
+  await ack();
+
+  const { channel, thread_ts, recipient } = JSON.parse(view.private_metadata);
+  const strength = view.state.values.strength_block.strength_select.selected_option.value;
+  const note = view.state.values.note_block.note_input.value || "";
+
+  await postSticker(client, { channel, thread_ts, strength, note, mentionUserId: recipient });
+});
+
+// --- plain express routes, mounted on the same app as Bolt's receiver --
+const app = receiver.app;
+app.use(cors());
+app.use(express.json());
+
+// Kept from the standalone-picker version, for the webpage flow if you
+// still want that alongside the in-Slack shortcut.
 app.post("/send-sticker", async (req, res) => {
   try {
     const { strength, recipient, note } = req.body;
     if (!strength || !recipient) {
       return res.status(400).json({ error: "strength and recipient are required" });
     }
-
-    const target = await resolveTarget(recipient);
-    const imageUrl = STICKER_IMAGES[strength];
-
-    const blocks = [];
-    if (imageUrl) {
-      blocks.push({ type: "image", image_url: imageUrl, alt_text: strength });
-    }
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*You were seen for: ${strength}*${note ? `\n${note}` : ""}`,
-      },
+    const result = await postSticker(boltApp.client, {
+      channel: recipient, // expects a resolved Slack channel/user ID here
+      strength,
+      note,
     });
-
-    const slackRes = await fetch("https://slack.com/api/chat.postMessage", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ channel: target, blocks, text: `You were seen for: ${strength}` }),
-    });
-
-    const slackData = await slackRes.json();
-    if (!slackData.ok) throw new Error(`Slack error: ${slackData.error}`);
-
-    res.json({ ok: true, ts: slackData.ts });
+    res.json({ ok: true, ts: result.ts });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
