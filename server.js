@@ -30,9 +30,32 @@ const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 // Replace these with real hosted URLs (S3/Cloudinary/GitHub raw) once
 // you've cropped each circle out of the sticker sheet.
 const STICKER_IMAGES = {
-  Kindness: "https://example.com/stickers/kindness.png",
-  Curiosity: "https://example.com/stickers/curiosity.png",
-  // ...add the remaining 32 strengths here
+  "Love of Learning": `${BASE}/love-of-learning.png`,
+  "Gratitude": `${BASE}/gratitude.png`,
+  "Modesty": `${BASE}/modesty.png`,
+  "Humour": `${BASE}/humour.png`,
+  "Creativity": `${BASE}/creativity.png`,
+  "Hope": `${BASE}/hope.png`,
+  "Kindness": `${BASE}/kindness.png`,
+  "Compassion": `${BASE}/compassion.png`,
+  "Love of Beauty": `${BASE}/love-of-beauty.png`,
+  "Enthusiasm": `${BASE}/enthusiasm.png`,
+  "Love": `${BASE}/love.png`,
+  "Self-regulation": `${BASE}/self-regulation.png`,
+  "Honesty": `${BASE}/honesty.png`,
+  "Leadership": `${BASE}/leadership.png`,
+  "Grit": `${BASE}/grit.png`,
+  "Carefulness": `${BASE}/carefulness.png`,
+  "Forgiveness": `${BASE}/forgiveness.png`,
+  "Perspective": `${BASE}/perspective.png`,
+  "Fairness": `${BASE}/fairness.png`,
+  "Curiosity": `${BASE}/curiosity.png`,
+  "Spirituality": `${BASE}/spirituality.png`,
+  "Courage": `${BASE}/courage.png`,
+  "Judgement": `${BASE}/judgement.png`,
+  "Social Intelligence": `${BASE}/social-intelligence.png`,
+  "Perseverance": `${BASE}/perseverance.png`,
+  "Teamwork": `${BASE}/teamwork.png`,
 };
 
 // recipient can be a Slack user ID (U...), a channel ID (C...), or an
