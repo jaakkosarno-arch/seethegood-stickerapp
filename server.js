@@ -1,25 +1,31 @@
-// See the Good — sticker server, now with an in-Slack shortcut + modal,
-// alongside the original standalone /send-sticker route (used by the
-// picker webpage, if you still want that too).
+// See the Good — sticker server, Socket Mode version.
+//
+// With Socket Mode, Slack connects OUT to this server over a WebSocket —
+// you don't need a public Request URL for shortcuts/events. You still
+// need a normal HTTP route for /send-sticker (used by the standalone
+// picker webpage) and Render needs *something* listening on $PORT for
+// its health check, so we run a small Express server alongside Bolt.
 //
 // Setup:
 //   1. npm install
-//   2. .env needs:
+//   2. .env / Render environment variables need:
 //        SLACK_BOT_TOKEN=xoxb-...
-//        SLACK_SIGNING_SECRET=...   (from Slack app's Basic Information page)
-//   3. In your Slack app config:
-//        - Turn ON "Interactivity & Shortcuts"
-//        - Request URL: https://your-server.onrender.com/slack/events
-//        - Add a Message Shortcut: name "Give a Strength Sticker",
-//          callback_id "give_sticker"
-//        - Bot Token Scopes needed: chat:write
-//   4. node server.js  (or deploy to Render as before)
+//        SLACK_APP_TOKEN=xapp-...   (Basic Information -> App-Level Tokens
+//                                    -> generate one with scope connections:write)
+//   3. In Slack app config:
+//        - Socket Mode -> On (this generates/uses the App-Level Token)
+//        - Interactivity & Shortcuts -> On (no Request URL needed in Socket Mode)
+//        - Message Shortcut: name "Give a Strength Sticker", callback_id "give_sticker"
+//        - Event Subscriptions -> On, subscribe to bot event "app_home_opened"
+//        - App Home -> Home Tab enabled
+//        - Bot Token Scopes: chat:write
+//   4. node server.js
 
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import pkg from "@slack/bolt";
-const { App, ExpressReceiver } = pkg;
+const { App } = pkg;
 
 const BASE = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main";
 
@@ -53,7 +59,24 @@ const STICKER_IMAGES = {
   "Teamwork": `${BASE}/teamwork.png`,
 };
 
-// --- shared send logic, used by both the shortcut flow and /send-sticker ---
+// --- in-memory store (see earlier note: resets on restart/redeploy;
+// swap for a real DB when ready to keep permanent history) -------------
+const store = new Map();
+
+function recordSticker(userId, strength) {
+  if (!userId) return;
+  if (!store.has(userId)) store.set(userId, new Map());
+  const counts = store.get(userId);
+  counts.set(strength, (counts.get(strength) || 0) + 1);
+}
+
+function getCollection(userId) {
+  const counts = store.get(userId);
+  if (!counts) return [];
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+// --- shared send logic ---------------------------------------------------
 async function postSticker(client, { channel, thread_ts, strength, note, mentionUserId }) {
   const imageUrl = STICKER_IMAGES[strength];
   const blocks = [];
@@ -69,23 +92,54 @@ async function postSticker(client, { channel, thread_ts, strength, note, mention
     },
   });
 
-  return client.chat.postMessage({
+  const result = await client.chat.postMessage({
     channel,
     thread_ts,
     blocks,
     text: `${mention}was seen for ${strength}`,
   });
+
+  if (mentionUserId) recordSticker(mentionUserId, strength);
+  return result;
 }
 
-// --- Bolt app (handles the Slack shortcut + modal) --------------------
-const receiver = new ExpressReceiver({
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-  endpoints: "/slack/events",
-});
+// --- Home tab --------------------------------------------------------------
+async function publishHome(client, userId) {
+  const collection = getCollection(userId);
+  const total = collection.reduce((sum, [, count]) => sum + count, 0);
 
+  let blocks;
+  if (collection.length === 0) {
+    blocks = [
+      { type: "header", text: { type: "plain_text", text: "Your Strength Collection" } },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "No stickers yet — once a colleague sees the good in you, it'll show up here." },
+      },
+    ];
+  } else {
+    blocks = [
+      { type: "header", text: { type: "plain_text", text: "Your Strength Collection" } },
+      { type: "context", elements: [{ type: "mrkdwn", text: `*${total}* stickers collected` }] },
+      { type: "divider" },
+      ...collection.flatMap(([strength, count]) => {
+        const imageUrl = STICKER_IMAGES[strength];
+        const elements = [];
+        if (imageUrl) elements.push({ type: "image", image_url: imageUrl, alt_text: strength });
+        elements.push({ type: "mrkdwn", text: `*${strength}*  ×${count}` });
+        return [{ type: "context", elements }];
+      }),
+    ];
+  }
+
+  await client.views.publish({ user_id: userId, view: { type: "home", blocks } });
+}
+
+// --- Bolt app, Socket Mode ---------------------------------------------
 const boltApp = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  receiver,
+  appToken: process.env.SLACK_APP_TOKEN,
+  socketMode: true,
 });
 
 const strengthOptions = Object.keys(STICKER_IMAGES).map((name) => ({
@@ -93,10 +147,8 @@ const strengthOptions = Object.keys(STICKER_IMAGES).map((name) => ({
   value: name,
 }));
 
-// Message shortcut: right-click a message -> "Give a Strength Sticker"
 boltApp.shortcut("give_sticker", async ({ shortcut, ack, client }) => {
   await ack();
-
   await client.views.open({
     trigger_id: shortcut.trigger_id,
     view: {
@@ -105,7 +157,7 @@ boltApp.shortcut("give_sticker", async ({ shortcut, ack, client }) => {
       private_metadata: JSON.stringify({
         channel: shortcut.channel.id,
         thread_ts: shortcut.message.ts,
-        recipient: shortcut.message.user, // author of the original message
+        recipient: shortcut.message.user,
       }),
       title: { type: "plain_text", text: "Give a sticker" },
       submit: { type: "plain_text", text: "Send" },
@@ -127,46 +179,41 @@ boltApp.shortcut("give_sticker", async ({ shortcut, ack, client }) => {
           block_id: "note_block",
           optional: true,
           label: { type: "plain_text", text: "Note (optional)" },
-          element: {
-            type: "plain_text_input",
-            action_id: "note_input",
-            multiline: true,
-          },
+          element: { type: "plain_text_input", action_id: "note_input", multiline: true },
         },
       ],
     },
   });
 });
 
-// Modal submit handler
 boltApp.view("give_sticker_submit", async ({ ack, view, client }) => {
   await ack();
-
   const { channel, thread_ts, recipient } = JSON.parse(view.private_metadata);
   const strength = view.state.values.strength_block.strength_select.selected_option.value;
   const note = view.state.values.note_block.note_input.value || "";
-
   await postSticker(client, { channel, thread_ts, strength, note, mentionUserId: recipient });
+  await publishHome(client, recipient);
 });
 
-// --- plain express routes, mounted on the same app as Bolt's receiver --
-const app = receiver.app;
+boltApp.event("app_home_opened", async ({ event, client }) => {
+  if (event.tab !== "home") return;
+  await publishHome(client, event.user);
+});
+
+// --- separate plain Express server for /send-sticker + Render health check --
+const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Kept from the standalone-picker version, for the webpage flow if you
-// still want that alongside the in-Slack shortcut.
+app.get("/", (req, res) => res.send("See the Good sticker server is running."));
+
 app.post("/send-sticker", async (req, res) => {
   try {
     const { strength, recipient, note } = req.body;
     if (!strength || !recipient) {
       return res.status(400).json({ error: "strength and recipient are required" });
     }
-    const result = await postSticker(boltApp.client, {
-      channel: recipient, // expects a resolved Slack channel/user ID here
-      strength,
-      note,
-    });
+    const result = await postSticker(boltApp.client, { channel: recipient, strength, note });
     res.json({ ok: true, ts: result.ts });
   } catch (err) {
     console.error(err);
@@ -175,4 +222,9 @@ app.post("/send-sticker", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Sticker server running on :${PORT}`));
+
+(async () => {
+  await boltApp.start(); // opens the Socket Mode WebSocket connection
+  console.log("⚡️ Slack Bolt app running in Socket Mode");
+  app.listen(PORT, () => console.log(`HTTP server (for /send-sticker) running on :${PORT}`));
+})();
