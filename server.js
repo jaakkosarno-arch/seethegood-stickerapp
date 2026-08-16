@@ -148,6 +148,7 @@ const strengthOptions = Object.keys(STICKER_IMAGES).map((name) => ({
 }));
 
 boltApp.shortcut("give_sticker", async ({ shortcut, ack, client }) => {
+  console.log("Shortcut triggered:", shortcut.callback_id);
   await ack();
   await client.views.open({
     trigger_id: shortcut.trigger_id,
@@ -187,12 +188,19 @@ boltApp.shortcut("give_sticker", async ({ shortcut, ack, client }) => {
 });
 
 boltApp.view("give_sticker_submit", async ({ ack, view, client }) => {
+  console.log("Modal submitted");
   await ack();
-  const { channel, thread_ts, recipient } = JSON.parse(view.private_metadata);
-  const strength = view.state.values.strength_block.strength_select.selected_option.value;
-  const note = view.state.values.note_block.note_input.value || "";
-  await postSticker(client, { channel, thread_ts, strength, note, mentionUserId: recipient });
-  await publishHome(client, recipient);
+  try {
+    const { channel, thread_ts, recipient } = JSON.parse(view.private_metadata);
+    const strength = view.state.values.strength_block.strength_select.selected_option.value;
+    const note = view.state.values.note_block.note_input.value || "";
+    console.log("Sending sticker:", { channel, thread_ts, recipient, strength });
+    await postSticker(client, { channel, thread_ts, strength, note, mentionUserId: recipient });
+    console.log("Sticker posted successfully");
+    await publishHome(client, recipient);
+  } catch (err) {
+    console.error("Failed to post sticker:", err);
+  }
 });
 
 boltApp.event("app_home_opened", async ({ event, client }) => {
