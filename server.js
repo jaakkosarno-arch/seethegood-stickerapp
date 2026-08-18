@@ -27,7 +27,7 @@ import "dotenv/config";
 import pkg from "@slack/bolt";
 const { App } = pkg;
 
-const BASE = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main";
+const BASE = "https://res.cloudinary.com/azeqlaem/image/upload";
 
 const STICKER_IMAGES = {
   "Strength Spotter": `${BASE}/strength-spotter.png`,
